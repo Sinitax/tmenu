@@ -1,0 +1,7 @@
+tmenu
+=====
+
+A terminal menu for selecting an option from a newline-delimited
+list passed via stdin.
+
+Pressing CTRL+f will toggle fuzzy search.
