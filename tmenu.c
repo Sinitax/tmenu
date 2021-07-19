@@ -5,14 +5,15 @@
 
 #include <unistd.h>
 #include <termios.h>
+#include <sys/ioctl.h>
 
-void* checkp(void *p);
-void die(const char *fmtstr, ...);
-char* aprintf(const char *fmtstr, ...);
-void run();
-int handleopt(const char *flag, const char **args);
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
 
-const char *userfile = NULL;
+enum {
+	MODE_BROWSE,
+	MODE_SEARCH,
+};
 
 enum {
 	CODE_UP    = 0x100,
@@ -20,6 +21,36 @@ enum {
 	CODE_LEFT  = 0x102,
 	CODE_RIGHT = 0x103,
 };
+
+void* checkp(void *p);
+void die(const char *fmtstr, ...);
+char* aprintf(const char *fmtstr, ...);
+ssize_t fgetln(char *buf, size_t size, FILE *f);
+
+int handleopt(const char *flag, const char **args);
+
+void search_handlekey(int c);
+void search_selnext();
+
+const char *CSI_CLEARLINE = "\x1b[K";
+const char *CSI_HIDECUR = "\x1b[25l";
+const char *CSI_SHOWCUR = "\x1b[25h";
+
+const char *prompts[] = {
+	[MODE_BROWSE] = "(browse) ",
+	[MODE_SEARCH] = "(search) ",
+};
+
+const char *userfile = NULL;
+
+FILE *f;
+
+size_t linesel, linecap, linec, *lines = NULL;
+
+char searchbuf[1024] = { 0 };
+size_t searchc = 0;
+
+int mode = MODE_BROWSE;
 
 void*
 checkp(void *p)
@@ -84,27 +115,89 @@ readcode(FILE *f)
 }
 
 void
-addent(size_t linec, size_t pos, size_t **lines, size_t *linecap)
+setent(size_t linei, size_t pos)
 {
-	(*lines)[linec] = pos;
-	if (linec == *linecap - 1) {
-		*linecap *= 2;
-		*lines = checkp(realloc(*lines, *linecap));
+	if (linei >= linecap) {
+		linecap *= 2;
+		lines = checkp(realloc(lines, linecap));
 	}
+	lines[linei] = pos;
+}
+
+void
+search_handlekey(int c)
+{
+	switch (c) {
+	case 127: /* DEL */
+		if (searchc) searchc--;
+		return;
+	default:
+		if (searchc < sizeof(searchbuf))
+			searchbuf[searchc++] = c & 0xff;
+	}
+	search_selnext();
+}
+
+size_t
+linesize(size_t linei)
+{
+	return lines[linei + 1] - lines[linei];
+}
+
+char*
+readline(char *buf, int linei)
+{
+	size_t nleft, nread;
+	char *bp, *tok;
+
+	fseek(f, lines[linei], SEEK_SET);
+	nleft = linesize(linei);
+	buf = bp = checkp(realloc(buf, nleft));
+	while (nleft && (nread = fread(bp, 1, nleft, f)) > 0) {
+		nleft -= nread;
+		bp += nread;
+	}
+	if (nread < 0) die("Failed to read line %i from input\n", linei);
+	tok = memchr(buf, '\n', linesize(linei));
+	if (tok) *tok = '\0';
+
+	return buf;
+}
+
+void
+search_selnext()
+{
+	size_t i, linei, nread, nleft;
+	char *line = NULL, *end, *bp;
+
+	if (!searchc) return;
+
+	for (i = 0; i < linec; i++) {
+		linei = (linesel + 1 + i) % linec;
+		line = bp = readline(line, linei);
+		end = line + linesize(linei);
+		while (end - bp && (bp = memchr(bp, searchbuf[0], end - bp))) {
+			if (!memcmp(bp, searchbuf, MIN(end - bp, searchc))) {
+				linesel = linei;
+				goto exit;
+			}
+			bp += 1;
+		}
+	}
+
+exit:
+	free(line);
 }
 
 void
 run()
 {
-	char *tok, buf[1024];
 	struct termios prevterm, newterm;
-	size_t pos, start, linesel, nread,
-	       linec, linecap, *lines = NULL;
-	FILE *f;
+	ssize_t pos, start, nread;
+	const char *prompt;
+	struct winsize ws = { 0 };
+	char *tok, iobuf[1024], *line = NULL;
 	int c, termw;
-
-	if (tcgetattr(STDIN_FILENO, &prevterm))
-		die("Failed to get terminal properies\n");
 
 	linecap = 100;
 	lines = checkp(calloc(linecap, sizeof(size_t)));
@@ -114,60 +207,83 @@ run()
 			die("Failed to create temporary file\n");
 
 		linec = start = pos = 0;
-		while ((fgets(buf, sizeof(buf), stdin))) {
-			if ((tok = memchr(buf, '\n', sizeof(buf))))
-				addent(linec++, start, &lines, &linecap);
-			nread = tok ? tok - buf + 1 : sizeof(buf);
-			if (fwrite(buf, 1, nread, f) != nread)
-				die("Writing to tmp file failed\n");
+		while ((nread = fgetln(iobuf, sizeof(iobuf), stdin)) > 0) {
 			pos += nread;
-			if (tok) start = pos;
+			if (fwrite(iobuf, 1, nread, f) != nread)
+				die("Writing to tmp file failed\n");
+			if (iobuf[nread-1] == '\n') {
+				setent(linec++, start);
+				start = pos;
+			}
 		}
+		setent(linec, pos);
 
 		fseek(f, 0, SEEK_SET);
+
+		if (!freopen("/dev/tty", "r", stdin))
+			die("Failed to reattach to pseudo tty\n");
 	} else {
 		if (!(f = fopen(userfile, "r")))
 			die("Failed to open file for reading: %s\n", userfile);
 
 		linec = start = pos = 0;
-		while ((fgets(buf, sizeof(buf), f))) {
-			if ((tok = memchr(buf, '\n', sizeof(buf))))
-				addent(linec++, start, &lines, &linecap);
-			pos += tok ? tok - buf + 1 : sizeof(buf) - 1;
-			if (tok) start = pos;
+		while ((nread = fgetln(iobuf, sizeof(iobuf), f)) > 0) {
+			pos += nread;
+			if (iobuf[nread-1] == '\n') {
+				setent(linec++, start);
+				start = pos;
+			}
 		}
+		setent(linec, pos);
 
 		fseek(f, 0, SEEK_SET);
 	}
 
 	if (!linec) return;
-	printf("LINES: %li\n", linec);
+
+	if (tcgetattr(fileno(stdin), &prevterm))
+		die("Failed to get terminal properies\n");
 
 	cfmakeraw(&newterm);
-	if (tcsetattr(STDIN_FILENO, TCSANOW, &newterm))
+	if (tcsetattr(fileno(stdin), TCSANOW, &newterm))
 		die("Failed to set new terminal properties\n");
+
+	termw = (ioctl(STDERR_FILENO, TIOCGWINSZ, &ws) != -1) ? ws.ws_col : 80;
+
+	fprintf(stderr, "%s", CSI_HIDECUR);
 
 	linesel = 0;
 	do {
-		/* TODO: render lines */
-		termw = 80;
-		fseek(f, lines[linesel], SEEK_SET);
-		printf("%li %li\n\r", linesel, lines[linesel]);
-		fgets(buf, termw, f);
-		if (buf[termw-1] == '\n') buf[termw-1] = '\0';
-		printf("%s\n\r", buf);
+		if (mode == MODE_BROWSE) {
+			line = readline(line, linesel);
+			fprintf(stderr, "%s%s%.*s\r", CSI_CLEARLINE,
+				prompts[mode], termw - (int) strlen(prompts[mode]),
+				line);
+		} else if (mode == MODE_SEARCH) {
+			line = readline(line, linesel);
+			fprintf(stderr, "%s%s%.*s: %.*s\r", CSI_CLEARLINE,
+				prompts[mode], (int) searchc, searchbuf,
+				(int) (termw - strlen(prompts[mode]) - searchc),
+				line);
+		}
 
 		c = getc(stdin);
 		if (c == 0x1b) c = readcode(stdin);
-		printf("CODE: %i\n\r", c);
 		switch (c) {
 		case 0x03: /* CTRL+C */
 			goto exit;
+		case 0x13: /* CTRL+S */
+			if (mode != MODE_SEARCH) {
+				mode = MODE_SEARCH;
+				search_selnext();
+			}
+			break;
+		case 0x02: /* CTRL+B */
+			mode = MODE_BROWSE;
+			break;
 		case '\r':
-			fseek(f, lines[linesel], SEEK_SET);
-			while ((fgets(buf, sizeof(buf), f))
-					&& buf[sizeof(buf)-1] != '\n')
-				printf("%s", buf);
+			line = readline(line, linesel);
+			printf("%.*s", (int) linesize(linesel), line);
 			goto exit;
 		case CODE_UP:
 			if (linesel != 0) linesel--;
@@ -175,13 +291,31 @@ run()
 		case CODE_DOWN:
 			if (linesel != linec - 1) linesel++;
 			break;
+		default:
+			if (mode == MODE_SEARCH) {
+				search_handlekey(c);
+			}
 		}
 	} while (c >= 0);
 
 exit:
-	tcsetattr(STDIN_FILENO, TCSANOW, &prevterm);
+	fprintf(stderr, "\r%s", CSI_CLEARLINE);
+	fprintf(stderr, "\r%s", CSI_SHOWCUR);
+
+	tcsetattr(fileno(stdin), TCSANOW, &prevterm);
 
 	fclose(f);
+}
+
+ssize_t
+fgetln(char *buf, size_t size, FILE *f)
+{
+	size_t i = 0;
+
+	for (i = 0; i < size && (buf[i] = fgetc(f)) >= 0; i++)
+		if (buf[i] == '\n') return i + 1;
+
+	return (buf[i] < 0) ? -1 : i;
 }
 
 int
@@ -209,3 +343,4 @@ main(int argc, const char **argv)
 
 	run();
 }
+
