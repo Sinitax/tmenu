@@ -39,18 +39,18 @@ void die(const char *fmtstr, ...);
 char* aprintf(const char *fmtstr, ...); /* yet unused */
 
 int readkey(FILE *f);
-ssize_t freadln(char *buf, size_t size, FILE *f);
+int freadln(char *buf, int size, FILE *f);
 
-size_t entlen(size_t i);
-char* readent(char *buf, size_t linei);
-void setent(size_t linei, size_t start);
+int entlen(int i);
+char* readent(char *buf, int linei);
+void setent(int linei, int start);
 
 void browse_prompt();
 void browse_cleanup();
 
 void search_prompt();
 void search_handlekey(int c);
-ssize_t search_match(int start, int dir, int new, int cnt, int fallback);
+int search_match(int start, int dir, int new, int cnt, int fallback);
 void search_cleanup();
 
 int run();
@@ -71,12 +71,12 @@ static const char *userfile = NULL;
 
 static FILE *f;
 
-ssize_t entsel, entcap, entcnt, *entries = NULL;
+int entsel, entcap, entcnt, *entries = NULL;
 
 static char *entry = NULL;
 
 static char searchbuf[1024] = { 0 };
-static ssize_t searchc = 0;
+static int searchc = 0;
 static int fwdctx = 1;
 static int bwdctx = 1;
 static int termw = 80;
@@ -120,7 +120,7 @@ char*
 aprintf(const char *fmtstr, ...)
 {
 	va_list ap, cpy;
-	size_t size;
+	int size;
 	char *astr;
 
 	va_copy(cpy, ap);
@@ -160,27 +160,27 @@ readkey(FILE *f)
 	return c;
 }
 
-ssize_t
-freadln(char *buf, size_t size, FILE *f)
+int
+freadln(char *buf, int size, FILE *f)
 {
-	size_t i = 0;
+	int c, i;
 
-	for (i = 0; i < size && (buf[i] = fgetc(f)) >= 0; i++)
-		if (buf[i] == '\n') return i + 1;
+	for (c = i = 0; i < size && (c = fgetc(f)) >= 0; i++)
+		if ((buf[i] = c) == '\n') return i + 1;
 
-	return (buf[i] < 0) ? -1 : i;
+	return (c < 0) ? -1 : i;
 }
 
-size_t
-entlen(size_t linei)
+int
+entlen(int linei)
 {
 	return entries[linei + 1] - entries[linei];
 }
 
 char*
-readent(char *buf, size_t linei)
+readent(char *buf, int linei)
 {
-	size_t nleft, nread;
+	int nleft, nread;
 	char *bp, *tok;
 
 	fseek(f, entries[linei], SEEK_SET);
@@ -198,11 +198,11 @@ readent(char *buf, size_t linei)
 }
 
 void
-setent(size_t linei, size_t pos)
+setent(int linei, int pos)
 {
 	if (linei >= entcap) {
 		entcap *= 2;
-		entries = checkp(realloc(entries, entcap));
+		entries = checkp(realloc(entries, entcap * sizeof(int)));
 	}
 	entries[linei] = pos;
 }
@@ -210,7 +210,7 @@ setent(size_t linei, size_t pos)
 void
 browse_prompt()
 {
-	ssize_t i;
+	int i;
 	const char *prompt = "(browse) ";
 
 	for (i = entsel - bwdctx; i <= entsel + fwdctx; i++) {
@@ -219,7 +219,7 @@ browse_prompt()
 			continue;
 		}
 		entry = readent(entry, i);
-		eprintf("%s", CSI_CLEAR_LINE);
+		eprintf("%s\r", CSI_CLEAR_LINE);
 		if (i == entsel) eprintf("%s%s: ", CSI_STYLE_BOLD, prompt);
 		else eprintf("%*.s", (int) strlen(prompt) + 2, " ");
 		eprintf("%.*s\r\n", (int) (termw - strlen(prompt)), entry);
@@ -237,7 +237,7 @@ browse_handlekey(int c)
 void
 browse_cleanup()
 {
-	ssize_t i;
+	int i;
 
 	for (i = 0; i < bwdctx + 1 + fwdctx; i++)
 		eprintf("%s\n\r", CSI_CLEAR_LINE);
@@ -248,30 +248,35 @@ browse_cleanup()
 void
 search_prompt()
 {
-	ssize_t i, enti;
+	int i, enti;
 	const char *prompt = "(search) ";
 
+	if (entsel == -1) entsel = 0;
 	if ((enti = search_match(entsel, FWD, 0, 1, -1)) == -1)
-		entsel = search_match(entsel, BWD, 0, 1, 0);
+		entsel = search_match(entsel, BWD, 0, 1, -1);
 	else
 		entsel = enti;
 
 	for (i = - bwdctx; i <= fwdctx; i++) {
-		if (i < 0) {
-			enti = search_match(entsel, BWD, 1, -i, -1);
-		} else if (i == 0) {
-			enti = entsel;
-		} else if (i > 0) {
-			enti = search_match(entsel, FWD, 1, i, -1);
+		if (entsel >= 0) {
+			if (i < 0) {
+				enti = search_match(entsel, BWD, 1, -i, -1);
+			} else if (i == 0) {
+				enti = entsel;
+			} else if (i > 0) {
+				enti = search_match(entsel, FWD, 1, i, -1);
+			}
+		} else {
+			enti = -1;
 		}
 
-		eprintf("%s", CSI_CLEAR_LINE);
+		eprintf("%s\r", CSI_CLEAR_LINE);
 		if (i == 0) eprintf("%s%s%.*s: ", CSI_STYLE_BOLD, prompt,
 				    (int) searchc, searchbuf);
 		else eprintf("%*.s", (int) strlen(prompt) + 2, " ");
 
 		if (enti == -1) {
-			eprintf("%s\r\n", CSI_CLEAR_LINE);
+			eprintf("\n");
 			continue;
 		} else {
 			entry = readent(entry, enti);
@@ -305,10 +310,10 @@ search_handlekey(int c)
 	}
 }
 
-ssize_t
+int
 search_match(int start, int dir, int new, int cnt, int fallback)
 {
-	ssize_t i, enti, res, rescnt;
+	int i, enti, res, rescnt;
 	char *line = NULL, *end, *bp;
 
 	if (!searchc) {
@@ -343,7 +348,7 @@ exit:
 void
 search_cleanup()
 {
-	ssize_t i;
+	int i;
 
 	for (i = 0; i < bwdctx + 1 + fwdctx; i++)
 		eprintf("%s\n\r", CSI_CLEAR_LINE);
@@ -355,14 +360,14 @@ int
 run()
 {
 	struct termios prevterm, newterm = { 0 };
-	ssize_t pos, start, nread, enti;
+	int pos, start, nread, enti;
 	const char *prompt;
 	struct winsize ws = { 0 };
 	char *tok, iobuf[1024];
 	int i, c, termw;
 
 	entcap = 100;
-	entries = checkp(calloc(entcap, sizeof(size_t)));
+	entries = checkp(calloc(entcap, sizeof(int)));
 
 	if (!userfile) {
 		if (!(f = tmpfile()))
@@ -403,6 +408,7 @@ run()
 	}
 
 	if (!entcnt) return EXIT_SUCCESS;
+	eprintf("Loaded %i entries\n", entcnt);
 
 	if (tcgetattr(fileno(stdin), &prevterm))
 		die("Failed to get term attrs\n");
@@ -418,8 +424,7 @@ run()
 
 	entsel = 0;
 	do {
-		if (modes[mode].prompt)
-			modes[mode].prompt();
+		if (modes[mode].prompt) modes[mode].prompt();
 
 		switch ((c = readkey(stdin))) {
 		case 0x03: /* CTRL+C */
@@ -442,19 +447,18 @@ run()
 			break;
 		case '\r': /* NEWLINE */
 			entry = readent(entry, entsel);
-			printf("%.*s\n", (int) entlen(entsel), entry);
+			if (modes[mode].cleanup) modes[mode].cleanup();
+			printf("%.*s\n\r", entlen(entsel), entry);
 			if (!multiout) goto exit;
 			break;
 		default:
-			if (modes[mode].handlekey)
-				modes[mode].handlekey(c);
+			if (modes[mode].handlekey) modes[mode].handlekey(c);
 			break;
 		}
 	} while (c >= 0);
 
 exit:
-	if (modes[mode].cleanup)
-		modes[mode].cleanup();
+	if (modes[mode].cleanup) modes[mode].cleanup();
 
 	eprintf("%s", CSI_CUR_SHOW);
 
