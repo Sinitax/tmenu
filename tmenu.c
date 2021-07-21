@@ -13,12 +13,22 @@
 
 enum {
 	BWD = -1,
-	FWD = 1
+	FWD = 1,
 };
 
 enum {
 	MODE_BROWSE,
 	MODE_SEARCH,
+};
+
+enum {
+	SEARCH_SUBSTR,
+	SEARCH_FUZZY,
+};
+
+enum {
+	CASE_SENSITIVE,
+	CASE_INSENSITIVE,
 };
 
 enum {
@@ -34,9 +44,19 @@ struct mode {
 	void (*handlekey)();
 };
 
+struct searchmode {
+	const char *sh;
+	int (*matchfunc)(int, int, int, int, int);
+};
+
 void* checkp(void *p);
 void die(const char *fmtstr, ...);
 char* aprintf(const char *fmtstr, ...); /* yet unused */
+char chrlower(char c);
+char* strlower(const char *str);
+
+int searchcmp(const char *a, const char *b, size_t size);
+const char* searchfind(const char *a, char c, size_t size);
 
 int readkey(FILE *f);
 int freadln(char *buf, int size, FILE *f);
@@ -51,6 +71,8 @@ void browse_cleanup();
 void search_prompt();
 void search_handlekey(int c);
 int search_match(int start, int dir, int new, int cnt, int fallback);
+int search_match_substr(int start, int dir, int new, int cnt, int fallback);
+int search_match_fuzzy(int start, int dir, int new, int cnt, int fallback);
 void search_cleanup();
 
 int run();
@@ -77,6 +99,20 @@ static char *entry = NULL;
 
 static char searchbuf[1024] = { 0 };
 static int searchc = 0;
+
+static int searchcase = CASE_SENSITIVE;
+static int searchmode = SEARCH_SUBSTR;
+struct searchmode searchmodes[] = {
+	[SEARCH_SUBSTR] = {
+		.sh = "SUB",
+		.matchfunc = search_match_substr,
+	},
+	[SEARCH_FUZZY] = {
+		.sh = "FUZ",
+		.matchfunc = search_match_fuzzy,
+	}
+};
+
 static int fwdctx = 1;
 static int bwdctx = 1;
 static int termw = 80;
@@ -137,6 +173,61 @@ aprintf(const char *fmtstr, ...)
 	va_end(ap);
 
 	return astr;
+}
+
+char
+chrlower(char c)
+{
+	if (c >= 'A' && c <= 'Z')
+		c += 'a' - 'A';
+	return c;
+}
+
+char*
+strlower(const char *str)
+{
+	static char buf[1024], *bp;
+	int i;
+
+	strncpy(buf, str, sizeof(buf));
+	for (bp = buf; *bp; bp++)
+		*bp = chrlower(*bp);
+
+	return buf;
+}
+
+int
+searchcmp(const char *a, const char *b, size_t size)
+{
+	int i;
+
+	for (i = 0; i < size; i++) {
+		if (searchcase == CASE_SENSITIVE) {
+			if (a[i] != b[i])
+				return a[i] - b[i];
+		} else {
+			if (chrlower(a[i]) != chrlower(b[i]))
+				return chrlower(a[i]) - chrlower(b[i]);
+		}
+	}
+
+	return 0;
+}
+
+const char*
+searchfind(const char *a, char c, size_t size)
+{
+	int i;
+
+	for (i = 0; i < size; i++) {
+		if (searchcase == CASE_SENSITIVE) {
+			if (a[i] == c) return a + i;
+		} else if (chrlower(a[i]) == chrlower(c)) {
+			return a + i;
+		}
+	}
+
+	return NULL;
 }
 
 int
@@ -210,7 +301,7 @@ setent(int linei, int pos)
 void
 browse_prompt()
 {
-	int i;
+	int i, promptlen;
 	const char *prompt = "(browse) ";
 
 	for (i = entsel - bwdctx; i <= entsel + fwdctx; i++) {
@@ -218,11 +309,15 @@ browse_prompt()
 			eprintf("%s\r\n", CSI_CLEAR_LINE);
 			continue;
 		}
-		entry = readent(entry, i);
+
 		eprintf("%s\r", CSI_CLEAR_LINE);
-		if (i == entsel) eprintf("%s%s: ", CSI_STYLE_BOLD, prompt);
-		else eprintf("%*.s", (int) strlen(prompt) + 2, " ");
-		eprintf("%.*s\r\n", (int) (termw - strlen(prompt)), entry);
+
+		promptlen = snprintf(NULL, 0, "(browse): ");
+
+		entry = readent(entry, i);
+		if (i == entsel) eprintf("%s(browse): ", CSI_STYLE_BOLD);
+		else eprintf("%*.s", promptlen, " ");
+		eprintf("%.*s\r\n", termw - promptlen, entry);
 		if (i == entsel) eprintf("%s", CSI_STYLE_RESET);
 	}
 	for (i = 0; i < bwdctx + fwdctx + 1; i++)
@@ -248,8 +343,7 @@ browse_cleanup()
 void
 search_prompt()
 {
-	int i, enti;
-	const char *prompt = "(search) ";
+	int i, enti, promptlen;
 
 	if (entsel == -1) entsel = 0;
 	if ((enti = search_match(entsel, FWD, 0, 1, -1)) == -1)
@@ -270,18 +364,27 @@ search_prompt()
 			enti = -1;
 		}
 
+		promptlen = snprintf(NULL, 0, "(search[%c:%s]) %.*s: ",
+				(searchcase == CASE_SENSITIVE) ? 'I' : 'i',
+				searchmodes[searchmode].sh, searchc,
+				searchbuf);
+
 		eprintf("%s\r", CSI_CLEAR_LINE);
-		if (i == 0) eprintf("%s%s%.*s: ", CSI_STYLE_BOLD, prompt,
-				    (int) searchc, searchbuf);
-		else eprintf("%*.s", (int) strlen(prompt) + 2, " ");
+		if (i == 0) {
+			eprintf("%s(search[%c:%s]) %.*s: ", CSI_STYLE_BOLD,
+				(searchcase == CASE_SENSITIVE) ? 'I' : 'i',
+				searchmodes[searchmode].sh, searchc,
+				searchbuf);
+		} else {
+			eprintf("%*.s", promptlen, " ");
+		}
 
 		if (enti == -1) {
 			eprintf("\n");
 			continue;
 		} else {
 			entry = readent(entry, enti);
-			eprintf("%.*s\r\n", (int) (termw - strlen(prompt)),
-				entry);
+			eprintf("%.*s\r\n", termw - promptlen, entry);
 		}
 		if (i == 0) eprintf("%s", CSI_STYLE_RESET);
 	}
@@ -293,16 +396,24 @@ void
 search_handlekey(int c)
 {
 	switch (c) {
-	case 0x0a: /* CTRL+J */
-		entsel = search_match(entsel, BWD, 1, 1, entsel);
+	case 0x05: /* CTRL+E */
+		searchmode = SEARCH_SUBSTR;
+		break;
+	case 0x06: /* CTRL+F */
+		searchmode = SEARCH_FUZZY;
+		break;
+	case 0x09: /* CTRL+I */
+		searchcase ^= 1;
 		break;
 	case 0x0b: /* CTRL+K */
+		entsel = search_match(entsel, BWD, 1, 1, entsel);
+		break;
+	case 0x0c: /* CTRL+L */
 		entsel = search_match(entsel, FWD, 1, 1, entsel);
 		break;
 	case 0x20 ... 0x7e:
 		if (searchc < sizeof(searchbuf))
 			searchbuf[searchc++] = c & 0xff;
-		entsel = search_match(entsel, FWD, 0, 1, entsel);
 		break;
 	case 127: /* DEL */
 		if (searchc) searchc--;
@@ -313,36 +424,67 @@ search_handlekey(int c)
 int
 search_match(int start, int dir, int new, int cnt, int fallback)
 {
+	return searchmodes[searchmode].matchfunc(start, dir, new, cnt, fallback);
+}
+
+int
+search_match_substr(int start, int dir, int new, int cnt, int fallback)
+{
 	int i, enti, res, rescnt;
-	char *line = NULL, *end, *bp;
+	const char *end, *bp;
 
 	if (!searchc) {
 		res = start + dir * new;
 		return (res >= 0 && res < entcnt) ? res : fallback;
 	}
 
-	res = fallback;
 	rescnt = 0;
 	for (i = 0; i < entcnt; i++) {
 		enti = start + dir * (new + i);
 		if (enti < 0 || enti >= entcnt) break;
-		line = bp = readent(line, enti);
-		end = line + entlen(enti);
-		while (end - bp && (bp = memchr(bp, searchbuf[0], end - bp))) {
-			if (!memcmp(bp, searchbuf, MIN(end - bp, searchc))) {
+		bp = entry = readent(entry, enti);
+		end = entry + entlen(enti);
+		while (end - bp && (bp = searchfind(bp, searchbuf[0], end - bp))) {
+			if (!searchcmp(bp, searchbuf, MIN(end - bp, searchc))) {
 				rescnt++;
-				if (rescnt == cnt) {
-					res = enti;
-					goto exit;
-				}
+				if (rescnt == cnt) return enti;
 			}
 			bp += 1;
 		}
 	}
 
-exit:
-	free(line);
-	return res;
+	return fallback;
+}
+
+int
+search_match_fuzzy(int start, int dir, int new, int cnt, int fallback)
+{
+	int i, enti, res, rescnt;
+	const char *end, *bp, *sbp;
+
+	if (!searchc) {
+		res = start + dir * new;
+		return (res >= 0 && res < entcnt) ? res : fallback;
+	}
+
+	rescnt = 0;
+	for (i = 0; i < entcnt; i++) {
+		enti = start + dir * (new + i);
+		if (enti < 0 || enti >= entcnt) break;
+		bp = entry = readent(entry, enti);
+		sbp = searchbuf;
+		end = entry + entlen(enti);
+		while (end - bp && *sbp && (bp = searchfind(bp, *sbp, end - bp))) {
+			sbp += 1;
+			bp += 1;
+		}
+		if (!*sbp) {
+			rescnt++;
+			if (rescnt == cnt) return enti;
+		}
+	}
+
+	return fallback;
 }
 
 void
@@ -364,7 +506,7 @@ run()
 	const char *prompt;
 	struct winsize ws = { 0 };
 	char *tok, iobuf[1024];
-	int i, c, termw;
+	int i, c;
 
 	entcap = 100;
 	entries = checkp(calloc(entcap, sizeof(int)));
@@ -445,6 +587,7 @@ run()
 			mode = MODE_BROWSE;
 			if (entsel != entcnt - 1) entsel++;
 			break;
+		case 0x0a: /* CTRL+J */
 		case '\r': /* NEWLINE */
 			entry = readent(entry, entsel);
 			if (modes[mode].cleanup) modes[mode].cleanup();
