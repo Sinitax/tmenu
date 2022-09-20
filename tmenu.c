@@ -11,6 +11,18 @@
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define eprintf(...) fprintf(stderr, __VA_ARGS__)
 
+#define CSI_CLEAR_LINE   "\x1b[K\r"
+#define CSI_CUR_HIDE     "\x1b[?25l"
+#define CSI_CUR_SHOW     "\x1b[?25h"
+#define CSI_CUR_UP       "\x1b[A"
+#define CSI_CUR_DOWN     "\x1b[B"
+#define CSI_CUR_RIGHT    "\x1b[C"
+#define CSI_CUR_LEFT     "\x1b[D"
+#define CSI_STYLE_BOLD   "\x1b[1m"
+#define CSI_STYLE_RESET  "\x1b[0m"
+#define CSI_CLEAR_SCREEN "\x1b[2J"
+#define CSI_CUR_GOTO     "\x1b[%i%iH"
+
 enum {
 	BWD = -1,
 	FWD = 1,
@@ -66,6 +78,7 @@ char* readent(char *buf, int linei);
 void setent(int linei, int start);
 
 void browse_prompt();
+void browse_handlekey(int c);
 void browse_cleanup();
 
 void search_prompt();
@@ -79,19 +92,10 @@ int run();
 int handleopt(const char *flag, const char **args);
 int main(int argc, const char **argv);
 
-static const char *CSI_CLEAR_LINE = "\x1b[K";
-static const char *CSI_CUR_HIDE = "\x1b[?25l";
-static const char *CSI_CUR_SHOW = "\x1b[?25h";
-static const char *CSI_CUR_UP = "\x1b[A";
-static const char *CSI_CUR_DOWN = "\x1b[B";
-static const char *CSI_CUR_RIGHT = "\x1b[C";
-static const char *CSI_CUR_LEFT = "\x1b[D";
-static const char *CSI_STYLE_BOLD = "\x1b[1m";
-static const char *CSI_STYLE_RESET = "\x1b[0m";
-
 static const char *userfile = NULL;
 
 static FILE *f;
+int exit_status = 0;
 
 int entsel, entcap, entcnt, *entries = NULL;
 
@@ -120,7 +124,7 @@ static int termw = 80;
 struct mode modes[] = {
 	[MODE_BROWSE] = {
 		.prompt = browse_prompt,
-		.handlekey = NULL,
+		.handlekey = browse_handlekey,
 		.cleanup = browse_cleanup
 	},
 	[MODE_SEARCH] = {
@@ -222,8 +226,9 @@ searchfind(const char *a, char c, size_t size)
 	for (i = 0; i < size; i++) {
 		if (searchcase == CASE_SENSITIVE) {
 			if (a[i] == c) return a + i;
-		} else if (chrlower(a[i]) == chrlower(c)) {
-			return a + i;
+		} else if (searchcase == CASE_INSENSITIVE) {
+			if (chrlower(a[i]) == chrlower(c))
+				return a + i;
 		}
 	}
 
@@ -306,27 +311,35 @@ browse_prompt()
 
 	for (i = entsel - bwdctx; i <= entsel + fwdctx; i++) {
 		if (i < 0 || i >= entcnt) {
-			eprintf("%s\r\n", CSI_CLEAR_LINE);
+			eprintf(CSI_CLEAR_LINE "\n");
 			continue;
 		}
 
-		eprintf("%s\r", CSI_CLEAR_LINE);
+		eprintf(CSI_CLEAR_LINE);
 
 		promptlen = snprintf(NULL, 0, "(browse): ");
 
 		entry = readent(entry, i);
-		if (i == entsel) eprintf("%s(browse): ", CSI_STYLE_BOLD);
+		if (i == entsel) eprintf(CSI_STYLE_BOLD "(browse): ");
 		else eprintf("%*.s", promptlen, " ");
-		eprintf("%.*s\r\n", termw - promptlen, entry);
-		if (i == entsel) eprintf("%s", CSI_STYLE_RESET);
+		eprintf("%.*s\n", termw - promptlen, entry);
+		if (i == entsel) eprintf(CSI_STYLE_RESET);
 	}
 	for (i = 0; i < bwdctx + fwdctx + 1; i++)
-		eprintf("%s", CSI_CUR_UP);
+		eprintf(CSI_CUR_UP);
 }
 
 void
 browse_handlekey(int c)
 {
+	switch (c) {
+	case KEY_UP:
+		if (entsel != 0) entsel--;
+		break;
+	case KEY_DOWN:
+		if (entsel != entcnt - 1) entsel++;
+		break;
+	}
 }
 
 void
@@ -335,9 +348,9 @@ browse_cleanup()
 	int i;
 
 	for (i = 0; i < bwdctx + 1 + fwdctx; i++)
-		eprintf("%s\n\r", CSI_CLEAR_LINE);
+		eprintf(CSI_CLEAR_LINE "\n");
 	for (i = 0; i < bwdctx + 1 + fwdctx; i++)
-		eprintf("%s", CSI_CUR_UP);
+		eprintf(CSI_CUR_UP);
 }
 
 void
@@ -346,12 +359,13 @@ search_prompt()
 	int i, enti, promptlen;
 
 	if (entsel == -1) entsel = 0;
-	if ((enti = search_match(entsel, FWD, 0, 1, -1)) == -1)
-		entsel = search_match(entsel, BWD, 0, 1, -1);
-	else
+	if ((enti = search_match(entsel, FWD, 0, 1, -1)) == -1) {
+		entsel = search_match(entsel, BWD, 1, 1, -1);
+	} else {
 		entsel = enti;
+	}
 
-	for (i = - bwdctx; i <= fwdctx; i++) {
+	for (i = -bwdctx; i <= fwdctx; i++) {
 		if (entsel >= 0) {
 			if (i < 0) {
 				enti = search_match(entsel, BWD, 1, -i, -1);
@@ -369,9 +383,9 @@ search_prompt()
 				searchmodes[searchmode].sh, searchc,
 				searchbuf);
 
-		eprintf("%s\r", CSI_CLEAR_LINE);
+		eprintf(CSI_CLEAR_LINE);
 		if (i == 0) {
-			eprintf("%s(search[%c:%s]) %.*s: ", CSI_STYLE_BOLD,
+			eprintf(CSI_STYLE_BOLD "(search[%c:%s]) %.*s: ",
 				(searchcase == CASE_SENSITIVE) ? 'I' : 'i',
 				searchmodes[searchmode].sh, searchc,
 				searchbuf);
@@ -379,17 +393,18 @@ search_prompt()
 			eprintf("%*.s", promptlen, " ");
 		}
 
-		if (enti == -1) {
+		if (enti < 0) {
 			eprintf("\n");
 			continue;
 		} else {
 			entry = readent(entry, enti);
-			eprintf("%.*s\r\n", termw - promptlen, entry);
+			eprintf("%.*s\n", termw - promptlen, entry);
 		}
-		if (i == 0) eprintf("%s", CSI_STYLE_RESET);
+		if (i == 0) eprintf(CSI_STYLE_RESET);
 	}
+
 	for (i = 0; i < bwdctx + fwdctx + 1; i++)
-		eprintf("%s", CSI_CUR_UP);
+		eprintf(CSI_CUR_UP);
 }
 
 void
@@ -406,19 +421,22 @@ search_handlekey(int c)
 		searchcase ^= 1;
 		break;
 	case 0x0b: /* CTRL+K */
+	case KEY_UP:
 		entsel = search_match(entsel, BWD, 1, 1, entsel);
 		break;
 	case 0x0c: /* CTRL+L */
+	case KEY_DOWN:
 		entsel = search_match(entsel, FWD, 1, 1, entsel);
 		break;
 	case 0x20 ... 0x7e:
-		if (searchc < sizeof(searchbuf))
+		if (searchc < sizeof(searchbuf) - 1)
 			searchbuf[searchc++] = c & 0xff;
 		break;
 	case 127: /* DEL */
 		if (searchc) searchc--;
 		break;
 	}
+	searchbuf[searchc] = '\0';
 }
 
 int
@@ -434,22 +452,21 @@ search_match_substr(int start, int dir, int new, int cnt, int fallback)
 	const char *end, *bp;
 
 	if (!searchc) {
-		res = start + dir * new;
+		res = start + dir * (new + cnt - 1);
 		return (res >= 0 && res < entcnt) ? res : fallback;
 	}
 
 	rescnt = 0;
-	for (i = 0; i < entcnt; i++) {
-		enti = start + dir * (new + i);
+	for (i = new; i < entcnt; i++) {
+		enti = start + dir * i;
 		if (enti < 0 || enti >= entcnt) break;
-		bp = entry = readent(entry, enti);
+		entry = readent(entry, enti);
 		end = entry + entlen(enti);
-		while (end - bp && (bp = searchfind(bp, searchbuf[0], end - bp))) {
+		for (bp = entry; *bp; bp++) {
 			if (!searchcmp(bp, searchbuf, MIN(end - bp, searchc))) {
-				rescnt++;
-				if (rescnt == cnt) return enti;
+				if (++rescnt == cnt) return enti;
+				break;
 			}
-			bp += 1;
 		}
 	}
 
@@ -463,24 +480,23 @@ search_match_fuzzy(int start, int dir, int new, int cnt, int fallback)
 	const char *end, *bp, *sbp;
 
 	if (!searchc) {
-		res = start + dir * new;
+		res = start + dir * (new + cnt - 1);
 		return (res >= 0 && res < entcnt) ? res : fallback;
 	}
 
 	rescnt = 0;
-	for (i = 0; i < entcnt; i++) {
-		enti = start + dir * (new + i);
+	for (i = new; i < entcnt; i++) {
+		enti = start + dir * i;
 		if (enti < 0 || enti >= entcnt) break;
 		bp = entry = readent(entry, enti);
-		sbp = searchbuf;
 		end = entry + entlen(enti);
+		sbp = searchbuf;
 		while (end - bp && *sbp && (bp = searchfind(bp, *sbp, end - bp))) {
-			sbp += 1;
-			bp += 1;
+			sbp++;
+			bp++;
 		}
 		if (!*sbp) {
-			rescnt++;
-			if (rescnt == cnt) return enti;
+			if (++rescnt == cnt) return enti;
 		}
 	}
 
@@ -493,9 +509,9 @@ search_cleanup()
 	int i;
 
 	for (i = 0; i < bwdctx + 1 + fwdctx; i++)
-		eprintf("%s\n\r", CSI_CLEAR_LINE);
+		eprintf(CSI_CLEAR_LINE "\n");
 	for (i = 0; i < bwdctx + 1 + fwdctx; i++)
-		eprintf("%s", CSI_CUR_UP);
+		eprintf(CSI_CUR_UP);
 }
 
 int
@@ -556,42 +572,40 @@ run()
 		die("Failed to get term attrs\n");
 
 	cfmakeraw(&newterm);
+	newterm.c_oflag |= ONLCR | OPOST;
 	if (tcsetattr(fileno(stdin), TCSANOW, &newterm))
 		die("Failed to set term attrs\n");
-
-	if (ioctl(STDERR_FILENO, TIOCGWINSZ, &ws) != -1)
-		termw = ws.ws_col;
 
 	eprintf("%s", CSI_CUR_HIDE);
 
 	entsel = 0;
 	do {
+		if (ioctl(STDERR_FILENO, TIOCGWINSZ, &ws) != -1)
+			termw = ws.ws_col;
+
 		if (modes[mode].prompt) modes[mode].prompt();
 
 		switch ((c = readkey(stdin))) {
 		case 0x03: /* CTRL+C */
+		case 0x04: /* CTRL+D */
+			goto exit;
+		case 0x11: /* CTRL+Q */
+			exit_status = EXIT_FAILURE;
 			goto exit;
 		case 0x13: /* CTRL+S */
-			entsel = search_match(entsel, FWD,
-				mode == MODE_SEARCH, 1, entsel);
 			mode = MODE_SEARCH;
 			break;
 		case 0x02: /* CTRL+B */
 			mode = MODE_BROWSE;
 			break;
-		case KEY_UP:
-			mode = MODE_BROWSE;
-			if (entsel != 0) entsel--;
-			break;
-		case KEY_DOWN:
-			mode = MODE_BROWSE;
-			if (entsel != entcnt - 1) entsel++;
+		case 0x0c: /* CTRL+L */
+			eprintf(CSI_CLEAR_SCREEN CSI_CUR_GOTO, 0, 0);
 			break;
 		case 0x0a: /* CTRL+J */
 		case '\r': /* NEWLINE */
 			entry = readent(entry, entsel);
 			if (modes[mode].cleanup) modes[mode].cleanup();
-			printf("%.*s\n\r", entlen(entsel), entry);
+			printf("%.*s\n", entlen(entsel), entry);
 			if (!multiout) goto exit;
 			break;
 		default:
@@ -609,7 +623,7 @@ exit:
 
 	fclose(f);
 
-	return EXIT_SUCCESS;
+	return exit_status;
 }
 
 int
@@ -651,6 +665,8 @@ int
 main(int argc, const char **argv)
 {
 	int i;
+
+	setvbuf(stdout, NULL, _IONBF, 0);
 
 	for (i = 1; i < argc; i++) {
 		if (*argv[i] == '-') {
