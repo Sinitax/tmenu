@@ -11,6 +11,8 @@
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define eprintf(...) fprintf(stderr, __VA_ARGS__)
 
+#define KEY_CTRL(c) (((int) (c)) & 0b11111)
+
 #define CSI_CLEAR_LINE   "\x1b[K\r"
 #define CSI_CUR_HIDE     "\x1b[?25l"
 #define CSI_CUR_SHOW     "\x1b[?25h"
@@ -44,10 +46,13 @@ enum {
 };
 
 enum {
-	KEY_UP    = 0x100,
-	KEY_DOWN  = 0x101,
-	KEY_LEFT  = 0x102,
-	KEY_RIGHT = 0x103,
+	KEY_DEL = 0x7f,
+	KEY_UP = 0x100,
+	KEY_DOWN,
+	KEY_LEFT,
+	KEY_RIGHT,
+	KEY_PGUP,
+	KEY_PGDN,
 };
 
 struct mode {
@@ -92,7 +97,11 @@ int run();
 int handleopt(const char *flag, const char **args);
 int main(int argc, const char **argv);
 
+static const char *usage = \
+	"Usage: tmenu [-h] [-m] [-c LINES] [-a AFTER] [-b BEFORE]";
+
 static const char *userfile = NULL;
+
 
 static FILE *f;
 int exit_status = 0;
@@ -144,7 +153,7 @@ checkp(void *p)
 	return p;
 }
 
-void
+void __attribute__((noreturn))
 die(const char *fmtstr, ...)
 {
 	va_list ap;
@@ -411,20 +420,20 @@ void
 search_handlekey(int c)
 {
 	switch (c) {
-	case 0x05: /* CTRL+E */
+	case KEY_CTRL('E'):
 		searchmode = SEARCH_SUBSTR;
 		break;
-	case 0x06: /* CTRL+F */
+	case KEY_CTRL('F'):
 		searchmode = SEARCH_FUZZY;
 		break;
-	case 0x09: /* CTRL+I */
+	case KEY_CTRL('I'):
 		searchcase ^= 1;
 		break;
-	case 0x0b: /* CTRL+K */
+	case KEY_CTRL('K'):
 	case KEY_UP:
 		entsel = search_match(entsel, BWD, 1, 1, entsel);
 		break;
-	case 0x0c: /* CTRL+L */
+	case KEY_CTRL('L'):
 	case KEY_DOWN:
 		entsel = search_match(entsel, FWD, 1, 1, entsel);
 		break;
@@ -432,7 +441,7 @@ search_handlekey(int c)
 		if (searchc < sizeof(searchbuf) - 1)
 			searchbuf[searchc++] = c & 0xff;
 		break;
-	case 127: /* DEL */
+	case KEY_DEL:
 		if (searchc) searchc--;
 		break;
 	}
@@ -576,7 +585,7 @@ run()
 	if (tcsetattr(fileno(stdin), TCSANOW, &newterm))
 		die("Failed to set term attrs\n");
 
-	eprintf("%s", CSI_CUR_HIDE);
+	eprintf(CSI_CUR_HIDE);
 
 	entsel = 0;
 	do {
@@ -586,23 +595,23 @@ run()
 		if (modes[mode].prompt) modes[mode].prompt();
 
 		switch ((c = readkey(stdin))) {
-		case 0x03: /* CTRL+C */
-		case 0x04: /* CTRL+D */
+		case KEY_CTRL('C'):
+		case KEY_CTRL('D'):
 			goto exit;
-		case 0x11: /* CTRL+Q */
+		case KEY_CTRL('Q'):
 			exit_status = EXIT_FAILURE;
 			goto exit;
-		case 0x13: /* CTRL+S */
+		case KEY_CTRL('S'):
 			mode = MODE_SEARCH;
 			break;
-		case 0x02: /* CTRL+B */
+		case KEY_CTRL('B'):
 			mode = MODE_BROWSE;
 			break;
-		case 0x0c: /* CTRL+L */
+		case KEY_CTRL('L'):
 			eprintf(CSI_CLEAR_SCREEN CSI_CUR_GOTO, 0, 0);
 			break;
-		case 0x0a: /* CTRL+J */
-		case '\r': /* NEWLINE */
+		case KEY_CTRL('J'):
+		case '\r':
 			entry = readent(entry, entsel);
 			if (modes[mode].cleanup) modes[mode].cleanup();
 			printf("%.*s\n", entlen(entsel), entry);
@@ -652,13 +661,15 @@ handleopt(const char *flag, const char **args)
 		bwdctx = tmp / 2;
 		fwdctx = tmp - tmp / 2;
 		return 1;
+	case 'h':
+		printf("%s\n", usage);
+		return 0;
 	}
 
 	return 0;
 
 badint:
 	die("Invalid integer argument: %s\n", *args);
-	return 0;
 }
 
 int
@@ -674,7 +685,7 @@ main(int argc, const char **argv)
 		} else if (!userfile) {
 			userfile = argv[i];
 		} else {
-			printf("Unexpected argument: %s\n", argv[i]);
+			die("Unexpected argument: %s\n", argv[i]);
 		}
 	}
 
