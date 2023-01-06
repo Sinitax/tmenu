@@ -1,11 +1,14 @@
+#include <stddef.h>
+#include <unistd.h>
+#include <termios.h>
+#include <sys/ioctl.h>
+#include <err.h>
+
+#include <stdbool.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
-
-#include <unistd.h>
-#include <termios.h>
-#include <sys/ioctl.h>
 
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
@@ -46,6 +49,7 @@ enum {
 };
 
 enum {
+	KEY_NONE = 0,
 	KEY_DEL = 0x7f,
 	KEY_UP = 0x100,
 	KEY_DOWN,
@@ -58,79 +62,44 @@ enum {
 struct mode {
 	void (*prompt)();
 	void (*cleanup)();
-	void (*handlekey)();
+	bool (*handlekey)();
 };
 
 struct searchmode {
 	const char *sh;
-	int (*matchfunc)(int, int, int, int, int);
+	ssize_t (*match)(size_t, int, bool, size_t, ssize_t);
 };
 
-void* checkp(void *p);
-void die(const char *fmtstr, ...);
-char* aprintf(const char *fmtstr, ...); /* yet unused */
-char chrlower(char c);
-char* strlower(const char *str);
+void browse_prompt(void);
+bool browse_handlekey(int c);
+void browse_cleanup(void);
 
-int searchcmp(const char *a, const char *b, size_t size);
-const char* searchfind(const char *a, char c, size_t size);
+void search_prompt(void);
+bool search_handlekey(int c);
+void search_cleanup(void);
 
-int readkey(FILE *f);
-int freadln(char *buf, int size, FILE *f);
-
-int entlen(int i);
-char* readent(char *buf, int linei);
-void setent(int linei, int start);
-
-void browse_prompt();
-void browse_handlekey(int c);
-void browse_cleanup();
-
-void search_prompt();
-void search_handlekey(int c);
-int search_match(int start, int dir, int new, int cnt, int fallback);
-int search_match_substr(int start, int dir, int new, int cnt, int fallback);
-int search_match_fuzzy(int start, int dir, int new, int cnt, int fallback);
-void search_cleanup();
-
-int run();
-int handleopt(const char *flag, const char **args);
-int main(int argc, const char **argv);
+ssize_t search_match(size_t start, int dir,
+	bool new, size_t cnt, ssize_t fallback);
+ssize_t search_match_substr(size_t start, int dir,
+	bool new, size_t cnt, ssize_t fallback);
+ssize_t search_match_fuzzy(size_t start, int dir,
+	bool new, size_t cnt, ssize_t fallback);
 
 static const char *usage = \
-	"Usage: tmenu [-h] [-m] [-c LINES] [-a AFTER] [-b BEFORE]";
+	"Usage: tmenu [-h] [-m] [-a LINES] [-b LINES]";
 
-static const char *userfile = NULL;
-
-
-static FILE *f;
-int exit_status = 0;
-
-int entsel, entcap, entcnt, *entries = NULL;
-
-static char *entry = NULL;
-
-static char searchbuf[1024] = { 0 };
-static int searchc = 0;
-
-static int searchcase = CASE_SENSITIVE;
-static int searchmode = SEARCH_SUBSTR;
-struct searchmode searchmodes[] = {
+static const struct searchmode searchmodes[] = {
 	[SEARCH_SUBSTR] = {
 		.sh = "SUB",
-		.matchfunc = search_match_substr,
+		.match = search_match_substr,
 	},
 	[SEARCH_FUZZY] = {
 		.sh = "FUZ",
-		.matchfunc = search_match_fuzzy,
+		.match = search_match_fuzzy,
 	}
 };
 
-static int fwdctx = 1;
-static int bwdctx = 1;
-static int termw = 80;
-
-struct mode modes[] = {
+static const struct mode modes[] = {
 	[MODE_BROWSE] = {
 		.prompt = browse_prompt,
 		.handlekey = browse_handlekey,
@@ -143,84 +112,47 @@ struct mode modes[] = {
 	}
 };
 
-int mode = MODE_BROWSE;
-int multiout = 0;
+static FILE *infile;
 
-void*
-checkp(void *p)
-{
-	if (!p) die("Allocation failed.\n");
-	return p;
-}
+static size_t *entries;
+static size_t entries_cap, entries_cnt;
 
-void __attribute__((noreturn))
-die(const char *fmtstr, ...)
-{
-	va_list ap;
+static ssize_t selected;
+static char *entry;
 
-	va_start(ap, fmtstr);
-	vfprintf(stderr, fmtstr, ap);
-	va_end(ap);
+static char searchbuf[1024];
+static size_t searchlen;
 
-	exit(EXIT_FAILURE);
-}
+static int mode = MODE_BROWSE;
+static int searchcase = CASE_SENSITIVE;
+static int searchmode = SEARCH_SUBSTR;
 
-char*
-aprintf(const char *fmtstr, ...)
-{
-	va_list ap, cpy;
-	int size;
-	char *astr;
+static int fwdctx = 1;
+static int bwdctx = 1;
+static int termw = 80;
 
-	va_copy(cpy, ap);
-
-	va_start(cpy, fmtstr);
-	size = vsnprintf(NULL, 0, fmtstr, cpy);
-	va_end(cpy);
-
-	if (size < 0) die("Invalid fmtstr: %s\n", fmtstr);
-	if (!(astr = malloc(size + 1))) die("OOM: fmtstr alloc failed\n");
-
-	va_start(ap, fmtstr);
-	vsnprintf(astr, size, fmtstr, ap);
-	va_end(ap);
-
-	return astr;
-}
+static bool multiout = false;
 
 char
-chrlower(char c)
+lower(char c)
 {
 	if (c >= 'A' && c <= 'Z')
 		c += 'a' - 'A';
 	return c;
 }
 
-char*
-strlower(const char *str)
-{
-	static char buf[1024], *bp;
-	int i;
-
-	strncpy(buf, str, sizeof(buf));
-	for (bp = buf; *bp; bp++)
-		*bp = chrlower(*bp);
-
-	return buf;
-}
-
 int
-searchcmp(const char *a, const char *b, size_t size)
+search_cmp(const char *a, const char *b, size_t size)
 {
-	int i;
+	size_t i;
 
 	for (i = 0; i < size; i++) {
 		if (searchcase == CASE_SENSITIVE) {
 			if (a[i] != b[i])
 				return a[i] - b[i];
 		} else {
-			if (chrlower(a[i]) != chrlower(b[i]))
-				return chrlower(a[i]) - chrlower(b[i]);
+			if (lower(a[i]) != lower(b[i]))
+				return lower(a[i]) - lower(b[i]);
 		}
 	}
 
@@ -228,15 +160,15 @@ searchcmp(const char *a, const char *b, size_t size)
 }
 
 const char*
-searchfind(const char *a, char c, size_t size)
+search_find(const char *a, char c, size_t size)
 {
-	int i;
+	size_t i;
 
 	for (i = 0; i < size; i++) {
 		if (searchcase == CASE_SENSITIVE) {
 			if (a[i] == c) return a + i;
 		} else if (searchcase == CASE_INSENSITIVE) {
-			if (chrlower(a[i]) == chrlower(c))
+			if (lower(a[i]) == lower(c))
 				return a + i;
 		}
 	}
@@ -249,9 +181,14 @@ readkey(FILE *f)
 {
 	int c;
 
-	if ((c = fgetc(f)) != '\x1b') return c;
-	if ((c = fgetc(f)) != '[') return c;
-	switch ((c = fgetc(f))) {
+	c = fgetc(f);
+	if (c != '\x1b')
+		return c;
+
+	if (fgetc(f) != '[')
+		return KEY_NONE;
+
+	switch (fgetc(f)) {
 	case 'A':
 		return KEY_UP;
 	case 'B':
@@ -260,101 +197,153 @@ readkey(FILE *f)
 		return KEY_RIGHT;
 	case 'D':
 		return KEY_LEFT;
+	case '5':
+		return fgetc(f) == '~' ? KEY_PGUP : KEY_NONE;
+	case '6':
+		return fgetc(f) == '~' ? KEY_PGDN : KEY_NONE;
 	}
 
-	return c;
+	return KEY_NONE;
 }
 
-int
-freadln(char *buf, int size, FILE *f)
+size_t
+freadln(char *buf, size_t size, FILE *f)
 {
-	int c, i;
+	size_t i;
+	int c;
 
-	for (c = i = 0; i < size && (c = fgetc(f)) >= 0; i++)
-		if ((buf[i] = c) == '\n') return i + 1;
+	for (i = 0; i < size; i++) {
+		c = fgetc(f);
+		if (c < 0) return -1;
+		buf[i] = c;
+		if (c == '\n')
+			return i + 1;
+	}
 
-	return (c < 0) ? -1 : i;
+	return i;
 }
 
-int
-entlen(int linei)
+size_t
+entry_len(size_t index)
 {
-	return entries[linei + 1] - entries[linei];
+	return entries[index + 1] - entries[index];
 }
 
-char*
-readent(char *buf, int linei)
+char *
+read_entry(char *buf, size_t index)
 {
-	int nleft, nread;
-	char *bp, *tok;
+	ssize_t nleft, nread;
+	char *pos, *tok;
 
-	fseek(f, entries[linei], SEEK_SET);
-	nleft = entlen(linei);
-	buf = bp = checkp(realloc(buf, nleft));
-	while (nleft && (nread = fread(bp, 1, nleft, f)) > 0) {
+	fseek(infile, entries[index], SEEK_SET);
+
+	nleft = entry_len(index);
+	buf = realloc(buf, nleft);
+	if (!buf) err(1, "realloc");
+
+	pos = buf;
+	while (nleft > 0) {
+		nread = fread(pos, 1, nleft, infile);
+		if (!nread) break;
+		if (nread < 0) err(1, "fread");
 		nleft -= nread;
-		bp += nread;
+		pos += nread;
 	}
-	if (nread < 0) die("Failed to read line %i from input\n", linei);
-	tok = memchr(buf, '\n', entlen(linei));
+
+	tok = memchr(buf, '\n', entry_len(index));
 	if (tok) *tok = '\0';
 
 	return buf;
 }
 
 void
-setent(int linei, int pos)
+add_entry(size_t index, size_t pos)
 {
-	if (linei >= entcap) {
-		entcap *= 2;
-		entries = checkp(realloc(entries, entcap * sizeof(int)));
+	if (index >= entries_cap) {
+		entries_cap *= 2;
+		entries = realloc(entries,
+			entries_cap * sizeof(size_t));
+		if (!entries) err(1, "realloc");
 	}
-	entries[linei] = pos;
+	entries[index] = pos;
 }
 
 void
-browse_prompt()
+browse_prompt(void)
 {
-	int i, promptlen;
-	const char *prompt = "(browse) ";
+	ssize_t i;
 
-	for (i = entsel - bwdctx; i <= entsel + fwdctx; i++) {
-		if (i < 0 || i >= entcnt) {
-			eprintf(CSI_CLEAR_LINE "\n");
-			continue;
+	if (selected < 0) selected = 0;
+
+	for (i = selected - bwdctx; i <= selected + fwdctx; i++) {
+		eprintf(CSI_CLEAR_LINE);
+		if (i == selected) {
+			eprintf(CSI_STYLE_BOLD);
+			eprintf("(browse): ");
+		} else {
+			eprintf("%*.s", 10, " ");
 		}
 
-		eprintf(CSI_CLEAR_LINE);
+		if (selected >= 0 && i >= 0 && i < entries_cnt) {
+			entry = read_entry(entry, i);
+			eprintf("%.*s\n", termw - 10, entry);
+		} else {
+			eprintf("\n");
+		}
 
-		promptlen = snprintf(NULL, 0, "(browse): ");
-
-		entry = readent(entry, i);
-		if (i == entsel) eprintf(CSI_STYLE_BOLD "(browse): ");
-		else eprintf("%*.s", promptlen, " ");
-		eprintf("%.*s\n", termw - promptlen, entry);
-		if (i == entsel) eprintf(CSI_STYLE_RESET);
+		if (i == selected)
+			eprintf(CSI_STYLE_RESET);
 	}
+
 	for (i = 0; i < bwdctx + fwdctx + 1; i++)
 		eprintf(CSI_CUR_UP);
 }
 
-void
+bool
 browse_handlekey(int c)
 {
+	int cnt;
+	
 	switch (c) {
+	case 'g':
+		selected = 0;
+		break;
+	case 'G':
+		selected = entries_cnt - 1;
+		break;
+	case 'q':
+		return true;
+	case KEY_PGUP:
+		cnt = fwdctx + bwdctx + 1;
+		if (selected > cnt)
+			selected -= cnt;
+		else
+			selected = 0;
+		break;
+	case KEY_PGDN:
+		cnt = fwdctx + bwdctx + 1;
+		if (selected < entries_cnt - cnt)
+			selected += cnt;
+		else
+			selected = entries_cnt - 1;
+		break;
 	case KEY_UP:
-		if (entsel != 0) entsel--;
+		if (selected != 0)
+			selected--;
 		break;
 	case KEY_DOWN:
-		if (entsel != entcnt - 1) entsel++;
+		if (selected != entries_cnt - 1)
+			selected++;
 		break;
 	}
+
+	return false;
 }
 
 void
-browse_cleanup()
+browse_cleanup(void)
 {
-	int i;
+	size_t i;
 
 	for (i = 0; i < bwdctx + 1 + fwdctx; i++)
 		eprintf(CSI_CLEAR_LINE "\n");
@@ -363,52 +352,55 @@ browse_cleanup()
 }
 
 void
-search_prompt()
+search_prompt(void)
 {
-	int i, enti, promptlen;
+	char prompt[256];
+	ssize_t i, index;
+	ssize_t len;
 
-	if (entsel == -1) entsel = 0;
-	if ((enti = search_match(entsel, FWD, 0, 1, -1)) == -1) {
-		entsel = search_match(entsel, BWD, 1, 1, -1);
+	if (selected < 0) selected = 0;
+
+	index = search_match(selected, FWD, 0, 1, -1);
+	if (index != -1) {
+		selected = index;
 	} else {
-		entsel = enti;
+		selected = search_match(selected, BWD, 1, 1, -1);
 	}
 
+	len = snprintf(prompt, sizeof(prompt), "(search[%c:%s]) %.*s",
+			(searchcase == CASE_SENSITIVE) ? 'I' : 'i',
+			searchmodes[searchmode].sh, searchlen, searchbuf);
+	if (len < 0) err(1, "snprintf");
+
 	for (i = -bwdctx; i <= fwdctx; i++) {
-		if (entsel >= 0) {
+		if (selected >= 0) {
 			if (i < 0) {
-				enti = search_match(entsel, BWD, 1, -i, -1);
+				index = search_match(selected, BWD, 1, -i, -1);
 			} else if (i == 0) {
-				enti = entsel;
+				index = selected;
 			} else if (i > 0) {
-				enti = search_match(entsel, FWD, 1, i, -1);
+				index = search_match(selected, FWD, 1, i, -1);
 			}
 		} else {
-			enti = -1;
+			index = -1;
 		}
-
-		promptlen = snprintf(NULL, 0, "(search[%c:%s]) %.*s: ",
-				(searchcase == CASE_SENSITIVE) ? 'I' : 'i',
-				searchmodes[searchmode].sh, searchc,
-				searchbuf);
 
 		eprintf(CSI_CLEAR_LINE);
+
 		if (i == 0) {
-			eprintf(CSI_STYLE_BOLD "(search[%c:%s]) %.*s: ",
-				(searchcase == CASE_SENSITIVE) ? 'I' : 'i',
-				searchmodes[searchmode].sh, searchc,
-				searchbuf);
+			eprintf(CSI_STYLE_BOLD);
+			eprintf("%s : ", prompt);
 		} else {
-			eprintf("%*.s", promptlen, " ");
+			eprintf("%*.s", len + 3, " ");
 		}
 
-		if (enti < 0) {
+		if (index < 0) {
 			eprintf("\n");
-			continue;
 		} else {
-			entry = readent(entry, enti);
-			eprintf("%.*s\n", termw - promptlen, entry);
+			entry = read_entry(entry, index);
+			eprintf("%.*s\n", termw - len - 3, entry);
 		}
+
 		if (i == 0) eprintf(CSI_STYLE_RESET);
 	}
 
@@ -416,64 +408,89 @@ search_prompt()
 		eprintf(CSI_CUR_UP);
 }
 
-void
+bool
 search_handlekey(int c)
 {
+	int cnt;
+
 	switch (c) {
-	case KEY_CTRL('E'):
-		searchmode = SEARCH_SUBSTR;
-		break;
-	case KEY_CTRL('F'):
-		searchmode = SEARCH_FUZZY;
-		break;
 	case KEY_CTRL('I'):
 		searchcase ^= 1;
 		break;
+	case KEY_PGUP:
+		cnt = fwdctx + bwdctx + 1;
+		selected = search_match(selected, BWD, 1, cnt, selected);
+		break;
+	case KEY_PGDN:
+		cnt = fwdctx + bwdctx + 1;
+		selected = search_match(selected, FWD, 1, cnt, selected);
+		break;
 	case KEY_CTRL('K'):
 	case KEY_UP:
-		entsel = search_match(entsel, BWD, 1, 1, entsel);
+		selected = search_match(selected, BWD, 1, 1, selected);
 		break;
 	case KEY_CTRL('L'):
 	case KEY_DOWN:
-		entsel = search_match(entsel, FWD, 1, 1, entsel);
+		selected = search_match(selected, FWD, 1, 1, selected);
 		break;
 	case 0x20 ... 0x7e:
-		if (searchc < sizeof(searchbuf) - 1)
-			searchbuf[searchc++] = c & 0xff;
+		if (searchlen < sizeof(searchbuf) - 1)
+			searchbuf[searchlen++] = c & 0xff;
 		break;
 	case KEY_DEL:
-		if (searchc) searchc--;
+		if (searchlen) searchlen--;
 		break;
 	}
-	searchbuf[searchc] = '\0';
+
+	return false;
 }
 
-int
-search_match(int start, int dir, int new, int cnt, int fallback)
+void
+search_cleanup(void)
 {
-	return searchmodes[searchmode].matchfunc(start, dir, new, cnt, fallback);
+	size_t i;
+
+	for (i = 0; i < bwdctx + 1 + fwdctx; i++)
+		eprintf(CSI_CLEAR_LINE "\n");
+	for (i = 0; i < bwdctx + 1 + fwdctx; i++)
+		eprintf(CSI_CUR_UP);
 }
 
-int
-search_match_substr(int start, int dir, int new, int cnt, int fallback)
+ssize_t
+search_match(size_t start, int dir, bool new, size_t cnt, ssize_t fallback)
 {
-	int i, enti, res, rescnt;
+	return searchmodes[searchmode].match(start, dir, new, cnt, fallback);
+}
+
+ssize_t
+search_match_substr(size_t start, int dir,
+	bool new, size_t cnt, ssize_t fallback)
+{
 	const char *end, *bp;
+	size_t i, found, len;
+	ssize_t index;
 
-	if (!searchc) {
-		res = start + dir * (new + cnt - 1);
-		return (res >= 0 && res < entcnt) ? res : fallback;
+	if (!searchlen) {
+		index = start + dir * (new + cnt - 1);
+		if (index < 0 || index >= entries_cnt)
+			return fallback;
+		return index;
 	}
 
-	rescnt = 0;
-	for (i = new; i < entcnt; i++) {
-		enti = start + dir * i;
-		if (enti < 0 || enti >= entcnt) break;
-		entry = readent(entry, enti);
-		end = entry + entlen(enti);
+	found = 0;
+	for (i = new; i < entries_cnt; i++) {
+		index = start + dir * i;
+		if (index < 0 || index >= entries_cnt)
+			break;
+
+		entry = read_entry(entry, index);
+		end = entry + entry_len(index);
+
 		for (bp = entry; *bp; bp++) {
-			if (!searchcmp(bp, searchbuf, MIN(end - bp, searchc))) {
-				if (++rescnt == cnt) return enti;
+			len = MIN(end - bp, searchlen);
+			if (!search_cmp(bp, searchbuf, len)) {
+				if (++found == cnt)
+					return index;
 				break;
 			}
 		}
@@ -482,30 +499,39 @@ search_match_substr(int start, int dir, int new, int cnt, int fallback)
 	return fallback;
 }
 
-int
-search_match_fuzzy(int start, int dir, int new, int cnt, int fallback)
+ssize_t
+search_match_fuzzy(size_t start, int dir,
+	bool new, size_t cnt, ssize_t fallback)
 {
-	int i, enti, res, rescnt;
-	const char *end, *bp, *sbp;
+	const char *end, *pos, *c;
+	size_t i, found;
+	ssize_t index;
 
-	if (!searchc) {
-		res = start + dir * (new + cnt - 1);
-		return (res >= 0 && res < entcnt) ? res : fallback;
+	if (!searchlen) {
+		index = start + dir * (new + cnt - 1);
+		if (index < 0 || index >= entries_cnt)
+			return fallback;
+		return index;
 	}
 
-	rescnt = 0;
-	for (i = new; i < entcnt; i++) {
-		enti = start + dir * i;
-		if (enti < 0 || enti >= entcnt) break;
-		bp = entry = readent(entry, enti);
-		end = entry + entlen(enti);
-		sbp = searchbuf;
-		while (end - bp && *sbp && (bp = searchfind(bp, *sbp, end - bp))) {
-			sbp++;
-			bp++;
+	found = 0;
+	for (i = new; i < entries_cnt; i++) {
+		index = start + dir * i;
+		if (index < 0 || index >= entries_cnt)
+			break;
+
+		entry = read_entry(entry, index);
+		end = entry + entry_len(index);
+
+		pos = entry;
+		for (c = searchbuf; c - searchbuf < searchlen; c++) {
+			pos = search_find(pos, *c, end - pos);
+			if (!pos) break;
+			pos++;
 		}
-		if (!*sbp) {
-			if (++rescnt == cnt) return enti;
+		if (c == searchbuf + searchlen) {
+			if (++found == cnt)
+				return index;
 		}
 	}
 
@@ -513,139 +539,156 @@ search_match_fuzzy(int start, int dir, int new, int cnt, int fallback)
 }
 
 void
-search_cleanup()
+load_entries(const char *filepath)
 {
-	int i;
+	size_t pos, start;
+	ssize_t nread;
+	char iobuf[1024];
 
-	for (i = 0; i < bwdctx + 1 + fwdctx; i++)
-		eprintf(CSI_CLEAR_LINE "\n");
-	for (i = 0; i < bwdctx + 1 + fwdctx; i++)
-		eprintf(CSI_CUR_UP);
-}
+	entries_cnt = 0;
+	entries_cap = 100;
+	entries = calloc(entries_cap, sizeof(size_t));
+	if (!entries) err(1, "alloc");
 
-int
-run()
-{
-	struct termios prevterm, newterm = { 0 };
-	int pos, start, nread, enti;
-	const char *prompt;
-	struct winsize ws = { 0 };
-	char *tok, iobuf[1024];
-	int i, c;
+	if (!filepath) {
+		infile = tmpfile();
+		if (!infile) err(1, "tmpfile");
 
-	entcap = 100;
-	entries = checkp(calloc(entcap, sizeof(int)));
+		start = pos = 0;
+		while (true) {
+			nread = freadln(iobuf, sizeof(iobuf), stdin);
+			if (nread <= 0) break;
 
-	if (!userfile) {
-		if (!(f = tmpfile()))
-			die("Failed to create temporary file\n");
-
-		entcnt = start = pos = 0;
-		while ((nread = freadln(iobuf, sizeof(iobuf), stdin)) > 0) {
 			pos += nread;
-			if (fwrite(iobuf, 1, nread, f) != nread)
-				die("Writing to tmp file failed\n");
-			if (iobuf[nread-1] == '\n') {
-				setent(entcnt++, start);
+			if (fwrite(iobuf, 1, nread, infile) != nread)
+				errx(1, "fwrite to tmpfile truncated");
+			if (iobuf[nread - 1] == '\n') {
+				add_entry(entries_cnt, start);
+				entries_cnt++;
 				start = pos;
 			}
 		}
-		setent(entcnt, pos);
+		add_entry(entries_cnt, pos);
 
-		fseek(f, 0, SEEK_SET);
+		fseek(infile, 0, SEEK_SET);
 
 		if (!freopen("/dev/tty", "r", stdin))
-			die("Failed to reattach to pseudo tty\n");
-		if (fread(NULL, 0, 0, f) < 0) return EXIT_FAILURE;
+			err(1, "freopen tty");
+		if (fread(NULL, 0, 0, infile) < 0)
+			err(1, "fread stdin");
 	} else {
-		if (!(f = fopen(userfile, "r")))
-			die("Failed to open file for reading: %s\n", userfile);
+		infile = fopen(filepath, "r");
+		if (!infile) err(1, "fopen %s", filepath);
 
-		entcnt = start = pos = 0;
-		while ((nread = freadln(iobuf, sizeof(iobuf), f)) > 0) {
+		start = pos = 0;
+		while (true) {
+			nread = freadln(iobuf, sizeof(iobuf), infile);
+			if (nread <= 0) break;
+
 			pos += nread;
-			if (iobuf[nread-1] == '\n') {
-				setent(entcnt++, start);
+			if (iobuf[nread - 1] == '\n') {
+				add_entry(entries_cnt, start);
+				entries_cnt++;
 				start = pos;
 			}
 		}
-		setent(entcnt, pos);
+		add_entry(entries_cnt, pos);
 
-		fseek(f, 0, SEEK_SET);
+		fseek(infile, 0, SEEK_SET);
 	}
+}
 
-	if (!entcnt) return EXIT_SUCCESS;
-	eprintf("Loaded %i entries\n", entcnt);
+void
+run(const char *filepath)
+{
+	struct termios prevterm, newterm = { 0 };
+	struct winsize ws = { 0 };
+	int c;
+
+	load_entries(filepath);
+
+	eprintf("Loaded %i entries\n", entries_cnt);
+	if (!entries_cnt) return;
 
 	if (tcgetattr(fileno(stdin), &prevterm))
-		die("Failed to get term attrs\n");
+		err(1, "tcgetattr");
 
 	cfmakeraw(&newterm);
 	newterm.c_oflag |= ONLCR | OPOST;
 	if (tcsetattr(fileno(stdin), TCSANOW, &newterm))
-		die("Failed to set term attrs\n");
+		err(1, "tcsetattr");
 
 	eprintf(CSI_CUR_HIDE);
 
-	entsel = 0;
+	selected = 0;
+	searchlen = 0;
 	do {
-		if (ioctl(STDERR_FILENO, TIOCGWINSZ, &ws) != -1)
+		if (ioctl(1, TIOCGWINSZ, &ws) != -1)
 			termw = ws.ws_col;
 
-		if (modes[mode].prompt) modes[mode].prompt();
+		modes[mode].prompt();
 
 		switch ((c = readkey(stdin))) {
 		case KEY_CTRL('C'):
+			goto exit;
 		case KEY_CTRL('D'):
-			goto exit;
-		case KEY_CTRL('Q'):
-			exit_status = EXIT_FAILURE;
-			goto exit;
+			if (!multiout) goto exit;
+			break;
 		case KEY_CTRL('S'):
+			searchmode = SEARCH_SUBSTR;
 			mode = MODE_SEARCH;
 			break;
+		case KEY_CTRL('F'):
+			searchmode = SEARCH_FUZZY;
+			mode = MODE_SEARCH;
+			break;
+		case KEY_CTRL('Q'):
 		case KEY_CTRL('B'):
 			mode = MODE_BROWSE;
 			break;
 		case KEY_CTRL('L'):
 			eprintf(CSI_CLEAR_SCREEN CSI_CUR_GOTO, 0, 0);
 			break;
+		case KEY_CTRL('W'):
+			searchlen = 0;
+			break;
 		case KEY_CTRL('J'):
 		case '\r':
-			entry = readent(entry, entsel);
-			if (modes[mode].cleanup) modes[mode].cleanup();
-			printf("%.*s\n", entlen(entsel), entry);
+			entry = read_entry(entry, selected);
+			modes[mode].cleanup();
+			printf("%.*s\n", (int) entry_len(selected), entry);
 			if (!multiout) goto exit;
 			break;
 		default:
-			if (modes[mode].handlekey) modes[mode].handlekey(c);
+			if (modes[mode].handlekey(c))
+				goto exit;
 			break;
 		}
 	} while (c >= 0);
 
 exit:
-	if (modes[mode].cleanup) modes[mode].cleanup();
+	modes[mode].cleanup();
 
-	eprintf("%s", CSI_CUR_SHOW);
+	eprintf(CSI_CUR_SHOW);
 
 	tcsetattr(fileno(stdin), TCSANOW, &prevterm);
 
-	fclose(f);
-
-	return exit_status;
+	fclose(infile);
 }
 
 int
-handleopt(const char *flag, const char **args)
+parseopt(const char *flag, const char **args)
 {
 	char *end;
-	int tmp;
 
-	if (flag[0] && flag[1]) die("Unsupported flag: -%s\n", flag);
+	if (flag[0] && flag[1]) {
+		eprintf("Invalid flag: -%s\n", flag);
+		exit(1);
+	}
 
 	switch (flag[0]) {
 	case 'm':
-		multiout = 1;
+		multiout = true;
 		return 0;
 	case 'b':
 		fwdctx = strtol(*args, &end, 10);
@@ -655,39 +698,44 @@ handleopt(const char *flag, const char **args)
 		bwdctx = strtol(*args, &end, 10);
 		if (end && *end) goto badint;
 		return 1;
-	case 'c':
-		tmp = strtol(*args, &end, 10);
-		if (end && *end) goto badint;
-		bwdctx = tmp / 2;
-		fwdctx = tmp - tmp / 2;
-		return 1;
 	case 'h':
 		printf("%s\n", usage);
-		return 0;
+		exit(0);
 	}
 
 	return 0;
 
 badint:
-	die("Invalid integer argument: %s\n", *args);
+	eprintf("Invalid int: %s\n", *args);
+	exit(1);
 }
 
 int
 main(int argc, const char **argv)
 {
+	const char *filepath;
 	int i;
 
 	setvbuf(stdout, NULL, _IONBF, 0);
+	setvbuf(stderr, NULL, _IONBF, 0);
 
+	entry = NULL;
+	entries = NULL;
+
+	filepath = NULL;
 	for (i = 1; i < argc; i++) {
 		if (*argv[i] == '-') {
-			i += handleopt(argv[i] + 1, &argv[i+1]);
-		} else if (!userfile) {
-			userfile = argv[i];
+			i += parseopt(argv[i] + 1, &argv[i+1]);
+		} else if (!filepath) {
+			filepath = argv[i];
 		} else {
-			die("Unexpected argument: %s\n", argv[i]);
+			eprintf("Unexpected argument: %s\n", argv[i]);
+			return 0;
 		}
 	}
 
-	return run();
+	run(filepath);
+
+	free(entries);
+	free(entry);
 }
