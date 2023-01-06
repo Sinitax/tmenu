@@ -356,7 +356,7 @@ search_prompt(void)
 {
 	char prompt[256];
 	ssize_t i, index;
-	ssize_t len;
+	ssize_t len, entlen;
 
 	if (selected < 0) selected = 0;
 
@@ -369,7 +369,7 @@ search_prompt(void)
 
 	len = snprintf(prompt, sizeof(prompt), "(search[%c:%s]) %.*s",
 			(searchcase == CASE_SENSITIVE) ? 'I' : 'i',
-			searchmodes[searchmode].sh, searchlen, searchbuf);
+			searchmodes[searchmode].sh, (int) searchlen, searchbuf);
 	if (len < 0) err(1, "snprintf");
 
 	for (i = -bwdctx; i <= fwdctx; i++) {
@@ -391,14 +391,20 @@ search_prompt(void)
 			eprintf(CSI_STYLE_BOLD);
 			eprintf("%s : ", prompt);
 		} else {
-			eprintf("%*.s", len + 3, " ");
+			eprintf("%*.s", (int) (len + 3), " ");
 		}
 
 		if (index < 0) {
 			eprintf("\n");
 		} else {
+			entlen = entry_len(index);
 			entry = read_entry(entry, index);
-			eprintf("%.*s\n", termw - len - 3, entry);
+			if (entlen > termw - len - 3) {
+				eprintf("..%.*s\n", (int) (termw - len - 5),
+					entry + MAX(0, entlen - (termw - len - 5)));
+			} else {
+				eprintf("%.*s\n", (int) (termw - len - 3), entry);
+			}
 		}
 
 		if (i == 0) eprintf(CSI_STYLE_RESET);
@@ -607,7 +613,7 @@ run(const char *filepath)
 
 	load_entries(filepath);
 
-	eprintf("Loaded %i entries\n", entries_cnt);
+	eprintf("Loaded %lu entries\n", entries_cnt);
 	if (!entries_cnt) return;
 
 	if (tcgetattr(fileno(stdin), &prevterm))
