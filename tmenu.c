@@ -114,8 +114,6 @@ static const struct mode modes[] = {
 
 static FILE *infile;
 
-static bool verbose;
-
 static size_t *entries;
 static size_t entries_cap, entries_cnt;
 
@@ -134,6 +132,8 @@ static int bwdctx = 1;
 static int termw = 80;
 
 static bool multiout = false;
+static bool verbose = false;
+static bool prompt = true;
 
 char
 lower(char c)
@@ -279,11 +279,16 @@ browse_prompt(void)
 
 	for (i = selected - bwdctx; i <= selected + fwdctx; i++) {
 		eprintf(CSI_CLEAR_LINE);
-		if (i == selected) {
+
+		if (i == selected)
 			eprintf(CSI_STYLE_BOLD);
-			eprintf("(browse): ");
-		} else {
-			eprintf("%*.s", 10, " ");
+
+		if (prompt) {
+			if (i == selected) {
+				eprintf("(browse): ");
+			} else {
+				eprintf("%*.s", 10, " ");
+			}
 		}
 
 		if (selected >= 0 && i >= 0 && i < entries_cnt) {
@@ -356,7 +361,7 @@ browse_cleanup(void)
 void
 search_prompt(void)
 {
-	char prompt[256];
+	char promptbuf[256];
 	ssize_t i, index;
 	ssize_t len, entlen;
 
@@ -369,7 +374,7 @@ search_prompt(void)
 		selected = search_match(selected, BWD, 1, 1, -1);
 	}
 
-	len = snprintf(prompt, sizeof(prompt), "(search[%c:%s]) %.*s",
+	len = snprintf(promptbuf, sizeof(promptbuf), "(search[%c:%s]) %.*s",
 			(searchcase == CASE_SENSITIVE) ? 'I' : 'i',
 			searchmodes[searchmode].sh, (int) searchlen, searchbuf);
 	if (len < 0) err(1, "snprintf");
@@ -389,11 +394,14 @@ search_prompt(void)
 
 		eprintf(CSI_CLEAR_LINE);
 
-		if (i == 0) {
-			eprintf(CSI_STYLE_BOLD);
-			eprintf("%s : ", prompt);
-		} else {
-			eprintf("%*.s", (int) (len + 3), " ");
+		if (i == 0) eprintf(CSI_STYLE_BOLD);
+
+		if (prompt) {
+			if (i == 0) {
+				eprintf("%s : ", promptbuf);
+			} else {
+				eprintf("%*.s", (int) (len + 3), " ");
+			}
 		}
 
 		if (index < 0) {
@@ -664,6 +672,7 @@ run(const char *filepath)
 			break;
 		case KEY_CTRL('J'):
 		case '\r':
+			if (selected < 0) break;
 			entry = read_entry(entry, selected);
 			modes[mode].cleanup();
 			printf("%.*s\n", (int) entry_len(selected), entry);
@@ -703,11 +712,16 @@ parseopt(const char *flag, const char **args)
 	case 'v':
 		verbose = true;
 		return 0;
-	case 'b':
+	case 's':
+		mode = MODE_SEARCH;
+		searchmode = SEARCH_SUBSTR;
+		prompt = false;
+		return 0;
+	case 'a':
 		fwdctx = strtol(*args, &end, 10);
 		if (end && *end) goto badint;
 		return 1;
-	case 'a':
+	case 'b':
 		bwdctx = strtol(*args, &end, 10);
 		if (end && *end) goto badint;
 		return 1;
@@ -735,7 +749,6 @@ main(int argc, const char **argv)
 	entry = NULL;
 	entries = NULL;
 
-	verbose = false;
 	filepath = NULL;
 	for (i = 1; i < argc; i++) {
 		if (*argv[i] == '-') {
