@@ -114,6 +114,8 @@ static const struct mode modes[] = {
 
 static FILE *infile;
 
+static bool verbose;
+
 static size_t *entries;
 static size_t entries_cap, entries_cnt;
 
@@ -613,7 +615,9 @@ run(const char *filepath)
 
 	load_entries(filepath);
 
-	eprintf("Loaded %lu entries\n", entries_cnt);
+	if (verbose)
+		eprintf("Loaded %lu entries\n", entries_cnt);
+
 	if (!entries_cnt) return;
 
 	if (tcgetattr(fileno(stdin), &prevterm))
@@ -696,6 +700,9 @@ parseopt(const char *flag, const char **args)
 	case 'm':
 		multiout = true;
 		return 0;
+	case 'v':
+		verbose = true;
+		return 0;
 	case 'b':
 		fwdctx = strtol(*args, &end, 10);
 		if (end && *end) goto badint;
@@ -728,6 +735,7 @@ main(int argc, const char **argv)
 	entry = NULL;
 	entries = NULL;
 
+	verbose = false;
 	filepath = NULL;
 	for (i = 1; i < argc; i++) {
 		if (*argv[i] == '-') {
