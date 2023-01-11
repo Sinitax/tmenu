@@ -1,5 +1,8 @@
 CFLAGS = -g -Wunused-variable
 
+PREFIX ?= /usr
+BINDIR ?= /bin
+
 all: tmenu
 
 clean:
@@ -7,4 +10,10 @@ clean:
 
 tmenu: tmenu.c
 
-.PHONY: all clean
+install: tmenu
+	install -m755 tmenu -t "$(DESTDIR)$(PREFIX)$(BINDIR)"
+
+uninstall:
+	rm -f "$(DESTDIR)$(PREFIX)$(BINDIR)/tmenu"
+
+.PHONY: all clean install uninstall
