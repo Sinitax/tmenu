@@ -10,6 +10,7 @@
 #include <stdarg.h>
 #include <string.h>
 
+#define ARRLEN(x) (sizeof(x)/sizeof((x)[0]))
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define eprintf(...) fprintf(stderr, __VA_ARGS__)
@@ -273,9 +274,14 @@ add_entry(size_t index, size_t pos)
 void
 browse_prompt(void)
 {
+	static const char promptstr[] = "(browse): ";
+	size_t linew, entlen;
 	ssize_t i;
 
 	if (selected < 0) selected = 0;
+
+	linew = termw;
+	if (prompt) linew -= ARRLEN(promptstr) - 1;
 
 	for (i = selected - bwdctx; i <= selected + fwdctx; i++) {
 		eprintf(CSI_CLEAR_LINE);
@@ -293,7 +299,13 @@ browse_prompt(void)
 
 		if (selected >= 0 && i >= 0 && i < entries_cnt) {
 			entry = read_entry(entry, i);
-			eprintf("%.*s\n", termw - 10, entry);
+			entlen = entry_len(i);
+			if (entlen > linew) {
+				eprintf(" ..%.*s\n", (int) (linew - 3),
+					entry + entlen - (linew - 3));
+			} else {
+				eprintf("%.*s\n", (int) linew, entry);
+			}
 		} else {
 			eprintf("\n");
 		}
@@ -364,6 +376,7 @@ search_prompt(void)
 	char promptbuf[256];
 	ssize_t i, index;
 	ssize_t len, entlen;
+	size_t linew;
 
 	if (selected < 0) selected = 0;
 
@@ -378,6 +391,9 @@ search_prompt(void)
 			(searchcase == CASE_SENSITIVE) ? 'I' : 'i',
 			searchmodes[searchmode].sh, (int) searchlen, searchbuf);
 	if (len < 0) err(1, "snprintf");
+
+	linew = termw;
+	if (prompt) linew -= len + 3;
 
 	for (i = -bwdctx; i <= fwdctx; i++) {
 		if (selected >= 0) {
@@ -409,11 +425,11 @@ search_prompt(void)
 		} else {
 			entlen = entry_len(index);
 			entry = read_entry(entry, index);
-			if (entlen > termw - len - 3) {
-				eprintf("..%.*s\n", (int) (termw - len - 5),
-					entry + MAX(0, entlen - (termw - len - 5)));
+			if (entlen > linew) {
+				eprintf(" ..%.*s\n", (int) (linew - 3),
+					entry + MAX(0, entlen - (linew - 3)));
 			} else {
-				eprintf("%.*s\n", (int) (termw - len - 3), entry);
+				eprintf("%.*s\n", (int) linew, entry);
 			}
 		}
 
