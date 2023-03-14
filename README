@@ -1,7 +1,7 @@
 tmenu
 =====
 
-A terminal menu for selecting from newline-delimited items passed via stdin.
+A terminal menu for selecting items (lines) from stdin.
 
-Typical keybinds can be used to browse, CTRL+s to search via substring,
+Standard keybinds can be used to browse, CTRL+s to search via substring,
 CTRL+f to search using fuzzy matching.
